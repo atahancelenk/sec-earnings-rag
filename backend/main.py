@@ -25,16 +25,43 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Models loaded once at startup ─────────────────────────────────────────────
+# Lazy model loading 
+# Models are loaded on first request and cached — avoids OOM on startup
+# which would crash the process before it binds to a port.
+_embedder     = None
+_reranker     = None
+_index        = None
+_llm          = None
 
-embedder     = SentenceTransformer("all-MiniLM-L6-v2")
-reranker     = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
-pc           = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-index        = pc.Index(os.getenv("PINECONE_INDEX"))
-llm          = ChatGroq(
-    api_key=os.getenv("GROQ_API_KEY"),
-    model="llama-3.1-8b-instant",   # free, fast, good quality
-)
+def get_embedder():
+    global _embedder
+    if _embedder is None:
+        logger.info("Loading embedding model...")
+        _embedder = SentenceTransformer("all-MiniLM-L6-v2")
+    return _embedder
+
+def get_reranker():
+    global _reranker
+    if _reranker is None:
+        logger.info("Loading reranker model...")
+        _reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+    return _reranker
+
+def get_index():
+    global _index
+    if _index is None:
+        pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+        _index = pc.Index(os.getenv("PINECONE_INDEX"))
+    return _index
+
+def get_llm():
+    global _llm
+    if _llm is None:
+        _llm = ChatGroq(
+            api_key=os.getenv("GROQ_API_KEY"),
+            model="llama-3.1-8b-instant"
+        )
+    return _llm
 
 # ── Request / response models ─────────────────────────────────────────────────
 
@@ -69,7 +96,7 @@ def retrieve(request: QueryRequest) -> list[dict]:
     Embed the query and search Pinecone with optional metadata filters.
     Returns raw Pinecone matches.
     """
-    query_vector = embedder.encode(request.question).tolist()
+    query_vector = get_embedder.encode(request.question).tolist()
 
     # Build metadata filter — only apply fields the user specified
     filters = {}
@@ -80,7 +107,7 @@ def retrieve(request: QueryRequest) -> list[dict]:
     if request.fiscal_year:
         filters["fiscal_year"] = request.fiscal_year
 
-    results = index.query(
+    results = get_index().query(
         vector=query_vector,
         top_k=request.top_k,
         include_metadata=True,
@@ -103,7 +130,7 @@ def rerank(question: str, matches: list, top_n: int) -> list:
         return []
 
     pairs = [[question, m.metadata["text"]] for m in matches]
-    scores = reranker.predict(pairs)
+    scores = get_reranker().predict(pairs)
 
     # Attach scores and sort descending
     scored = sorted(
@@ -167,7 +194,7 @@ Answer with citations:"""
         HumanMessage(content=user_prompt),
     ]
 
-    response = llm.invoke(messages)
+    response = get_llm().invoke(messages)
     return response.content
 
 
