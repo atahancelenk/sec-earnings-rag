@@ -1,0 +1,31 @@
+# Core
+fastapi==0.115.0
+uvicorn==0.30.6
+pydantic==2.9.2
+
+# Streamlit
+streamlit==1.39.0
+
+# LLM + embeddings
+langchain==0.3.1
+langchain-core==0.3.6
+langchain-groq==0.2.0
+langchain-community==0.3.1
+sentence-transformers==3.1.1
+
+# Vector store
+pinecone==5.3.1
+
+# Data pipeline
+requests==2.32.3
+beautifulsoup4==4.12.3
+lxml==5.3.0
+tiktoken==0.8.0
+
+# Evaluation
+ragas==0.2.15
+datasets==3.0.1
+pandas==2.2.3
+
+# Utils
+python-dotenv==1.0.1

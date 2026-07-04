@@ -1,0 +1,25 @@
+services:
+  # FastAPI backend 
+  - type: web
+    name: sec-rag-api
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PINECONE_API_KEY
+        sync: false          # you'll paste this in Render dashboard
+      - key: PINECONE_INDEX
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+    healthCheckPath: /health
+
+  # Streamlit frontend
+  - type: web
+    name: sec-rag-frontend
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run frontend/app.py --server.port $PORT --server.address 0.0.0.0
+    envVars:
+      - key: API_URL
+        sync: false          # paste your backend Render URL here after deploying
