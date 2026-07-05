@@ -3,14 +3,8 @@ import logging
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
-from sentence_transformers import SentenceTransformer, CrossEncoder
-from pinecone import Pinecone
-from langchain_groq import ChatGroq
-from langchain_core.messages import HumanMessage, SystemMessage
-from sentence_transformers import CrossEncoder
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -25,53 +19,65 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Lazy model loading 
-# Models are loaded on first request and cached — avoids OOM on startup
-# which would crash the process before it binds to a port.
-_embedder     = None
-_reranker     = None
-_index        = None
-_llm          = None
+# Lazy model loading
+# All heavy imports (torch, sentence-transformers, pinecone, langchain) are
+# inside these loader functions. This means uvicorn can start, bind to the
+# port, and pass Render's health check before any model is loaded.
+# Each model loads once on first request, then stays cached.
+
+_embedder = None
+_reranker = None
+_index    = None
+_llm      = None
+
 
 def get_embedder():
     global _embedder
     if _embedder is None:
+        from sentence_transformers import SentenceTransformer
         logger.info("Loading embedding model...")
         _embedder = SentenceTransformer("all-MiniLM-L6-v2")
     return _embedder
 
+
 def get_reranker():
     global _reranker
     if _reranker is None:
+        from sentence_transformers import CrossEncoder
         logger.info("Loading reranker model...")
         _reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
     return _reranker
 
+
 def get_index():
     global _index
     if _index is None:
+        from pinecone import Pinecone
         pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
         _index = pc.Index(os.getenv("PINECONE_INDEX"))
     return _index
 
+
 def get_llm():
     global _llm
     if _llm is None:
+        from langchain_groq import ChatGroq
         _llm = ChatGroq(
             api_key=os.getenv("GROQ_API_KEY"),
-            model="llama-3.1-8b-instant"
+            model="llama-3.1-8b-instant",
         )
     return _llm
 
-# ── Request / response models ─────────────────────────────────────────────────
+
+# Request / response models
 
 class QueryRequest(BaseModel):
-    question: str
-    ticker:   Optional[str] = None      # e.g. "AAPL" — filters Pinecone search
-    form_type: Optional[str] = None     # "10-K" or "10-Q"
+    question:    str
+    ticker:      Optional[str] = None
+    form_type:   Optional[str] = None
     fiscal_year: Optional[int] = None
-    top_k:    int = 10                  # candidates before reranking
-    top_n:    int = 4                   # chunks kept after reranking
+    top_k:       int = 10
+    top_n:       int = 4
 
 
 class SourceChunk(BaseModel):
@@ -89,16 +95,11 @@ class QueryResponse(BaseModel):
     sources: list[SourceChunk]
 
 
-# ── Core RAG pipeline ─────────────────────────────────────────────────────────
+# Core RAG pipeline
 
-def retrieve(request: QueryRequest) -> list[dict]:
-    """
-    Embed the query and search Pinecone with optional metadata filters.
-    Returns raw Pinecone matches.
-    """
-    query_vector = get_embedder.encode(request.question).tolist()
+def retrieve(request: QueryRequest) -> list:
+    query_vector = get_embedder().encode(request.question).tolist()
 
-    # Build metadata filter — only apply fields the user specified
     filters = {}
     if request.ticker:
         filters["ticker"] = request.ticker.upper()
@@ -118,21 +119,12 @@ def retrieve(request: QueryRequest) -> list[dict]:
 
 
 def rerank(question: str, matches: list, top_n: int) -> list:
-    """
-    Cross-encoder reranking: scores every (question, chunk) pair
-    and returns the top_n highest scoring chunks.
-    
-    Why this matters: vector similarity finds semantically related chunks
-    but can miss the most directly relevant ones. The cross-encoder
-    reads question + chunk together, giving much more accurate relevance scores.
-    """
     if not matches:
         return []
 
     pairs = [[question, m.metadata["text"]] for m in matches]
     scores = get_reranker().predict(pairs)
 
-    # Attach scores and sort descending
     scored = sorted(
         zip(scores, matches),
         key=lambda x: x[0],
@@ -143,10 +135,6 @@ def rerank(question: str, matches: list, top_n: int) -> list:
 
 
 def build_context(scored_matches: list) -> tuple[str, list[SourceChunk]]:
-    """
-    Format reranked chunks into a context block for the LLM
-    and build the source citations list.
-    """
     context_parts = []
     sources = []
 
@@ -173,9 +161,8 @@ def build_context(scored_matches: list) -> tuple[str, list[SourceChunk]]:
 
 
 def generate_answer(question: str, context: str) -> str:
-    """
-    Call Groq with the retrieved context and return a cited answer.
-    """
+    from langchain_core.messages import HumanMessage, SystemMessage
+
     system_prompt = """You are a financial analyst assistant specializing in SEC filings.
 Answer questions using ONLY the provided context from SEC filings.
 Always cite your sources using [Source N] notation.
@@ -198,30 +185,20 @@ Answer with citations:"""
     return response.content
 
 
-# ── API endpoints ─────────────────────────────────────────────────────────────
+# API endpoints
 
 @app.post("/query", response_model=QueryResponse)
 def query(request: QueryRequest):
-    """
-    Main RAG endpoint.
-    1. Embed query → Pinecone search
-    2. Cross-encoder rerank
-    3. Groq LLM answer with citations
-    """
     if not request.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty")
 
     logger.info(f"Query: {request.question[:80]}")
 
-    # Step 1: retrieve
     matches = retrieve(request)
     if not matches:
         raise HTTPException(status_code=404, detail="No relevant documents found")
 
-    # Step 2: rerank
     scored = rerank(request.question, matches, request.top_n)
-
-    # Step 3: build context + generate
     context, sources = build_context(scored)
     answer = generate_answer(request.question, context)
 
@@ -236,5 +213,4 @@ def health():
 
 @app.get("/tickers")
 def list_tickers():
-    """Return the list of tickers available in the index."""
     return {"tickers": ["AAPL", "MSFT", "NVDA"]}
