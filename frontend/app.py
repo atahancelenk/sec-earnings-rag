@@ -322,7 +322,12 @@ if run and question.strip():
 
     with st.spinner("Retrieving · Reranking · Generating..."):
         try:
-            resp = requests.post(f"{API_URL}/query", json=payload, timeout=60)
+            # Ping health endpoint first — wakes the backend if it was sleeping
+            try:
+                requests.get(f"{API_URL}/health", timeout=90)
+            except Exception:
+                pass
+            resp = requests.post(f"{API_URL}/query", json=payload, timeout=120)
             resp.raise_for_status()
             data = resp.json()
 
