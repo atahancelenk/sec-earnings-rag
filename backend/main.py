@@ -30,15 +30,14 @@ _reranker = None
 _index    = None
 _llm      = None
 
-
 def get_embedder():
     global _embedder
     if _embedder is None:
         from sentence_transformers import SentenceTransformer
-        logger.info("Loading embedding model...")
+        logger.info("Loading embedding model (this takes ~20s on first request)...")
         _embedder = SentenceTransformer("all-MiniLM-L6-v2")
+        logger.info("Embedding model loaded.")
     return _embedder
-
 
 def get_reranker():
     global _reranker
@@ -46,8 +45,8 @@ def get_reranker():
         from sentence_transformers import CrossEncoder
         logger.info("Loading reranker model...")
         _reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+        logger.info("Reranker loaded.")
     return _reranker
-
 
 def get_index():
     global _index
@@ -68,7 +67,6 @@ def get_llm():
         )
     return _llm
 
-
 # Request / response models
 
 class QueryRequest(BaseModel):
@@ -79,7 +77,6 @@ class QueryRequest(BaseModel):
     top_k:       int = 10
     top_n:       int = 4
 
-
 class SourceChunk(BaseModel):
     chunk_id:    str
     ticker:      str
@@ -89,11 +86,9 @@ class SourceChunk(BaseModel):
     text:        str
     score:       float
 
-
 class QueryResponse(BaseModel):
     answer:  str
     sources: list[SourceChunk]
-
 
 # Core RAG pipeline
 
@@ -117,7 +112,6 @@ def retrieve(request: QueryRequest) -> list:
 
     return results.matches
 
-
 def rerank(question: str, matches: list, top_n: int) -> list:
     if not matches:
         return []
@@ -132,7 +126,6 @@ def rerank(question: str, matches: list, top_n: int) -> list:
     )
 
     return scored[:top_n]
-
 
 def build_context(scored_matches: list) -> tuple[str, list[SourceChunk]]:
     context_parts = []
@@ -159,7 +152,6 @@ def build_context(scored_matches: list) -> tuple[str, list[SourceChunk]]:
 
     return "\n\n---\n\n".join(context_parts), sources
 
-
 def generate_answer(question: str, context: str) -> str:
     from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -184,6 +176,23 @@ Answer with citations:"""
     response = get_llm().invoke(messages)
     return response.content
 
+# Startup event 
+
+@app.on_event("startup")
+async def startup_event():
+    """
+    Load models sequentially after port is bound.
+    Sequential loading avoids the memory spike of loading everything at once.
+    """
+    import asyncio
+    logger.info("Startup: loading index connection...")
+    get_index()
+    logger.info("Startup: loading LLM connection...")
+    get_llm()
+    # NOTE: we deliberately skip loading embedder and reranker here
+    # They are the heavy ones (torch). Let them load on first request
+    # after the health check confirms the server is up.
+    logger.info("Startup complete — server ready")
 
 # API endpoints
 
@@ -204,7 +213,6 @@ def query(request: QueryRequest):
 
     logger.info(f"Answer generated from {len(sources)} sources")
     return QueryResponse(answer=answer, sources=sources)
-
 
 @app.get("/health")
 def health():
